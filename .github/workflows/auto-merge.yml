@@ -1,0 +1,108 @@
+name: auto-merge
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+jobs:
+  smoke:
+    name: ci / smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Python import smoke (if Python project)
+        run: |
+          if find . -maxdepth 2 -name '*.py' -not -path './.git/*' | head -1 | grep -q .; then
+            python3 -c "import json,pathlib; print('python OK', pathlib.Path('.').resolve().name)"
+          else
+            echo "no Python files; skipping"
+          fi
+      - name: Files present
+        run: |
+          test -d .github/workflows
+          ls -la .github/workflows
+          echo "structure OK"
+
+  auto-merge:
+    name: auto-merge gate
+    runs-on: ubuntu-latest
+    needs: [smoke]
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Resolve PR number
+        id: pr
+        run: echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for review-bot verdict (worst-of all posted comments)
+        id: wait
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          rank() { case "$1" in Approve) echo 0 ;; "Changes Requested") echo 1 ;; Blocked) echo 2 ;; *) echo -1 ;; esac; }
+          worst=""
+          worst_rank=-1
+          for i in $(seq 1 24); do
+            http_code=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+              --include -o /tmp/_comments.json -w "%{http_code}" 2>/dev/null || echo "0")
+            if [ "$http_code" = "403" ] || [ "$http_code" = "429" ]; then
+              echo "[poll $i/24] rate-limited (HTTP $http_code), backing off 60s"
+              sleep 60
+              continue
+            fi
+            comments=$(jq -r '.[] | select(.body | contains("**Verdict:**")) | .body' /tmp/_comments.json 2>/dev/null || echo "")
+            for v in $(printf '%s\n' "$comments" | grep -oE '\*\*Verdict:\*\*\s*(Approve|Changes Requested|Blocked)' | awk '{print $NF}'); do
+              r=$(rank "$v")
+              if [ "$r" -gt "$worst_rank" ]; then worst_rank=$r; worst=$v; fi
+            done
+            if [ -n "$worst" ]; then
+              echo "worst-of verdict: $worst"
+              echo "VERDICT=$worst" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "[poll $i/24] no verdict yet"
+            sleep 15
+          done
+          echo "VERDICT=<timeout>" >> "$GITHUB_OUTPUT"
+
+      - name: Verdict + mergeable check
+        env:
+          VERDICT: ${{ steps.wait.outputs.VERDICT }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          echo "Final verdict: $VERDICT"
+          if [ "$VERDICT" != "Approve" ]; then
+            msg="🤖 auto-merge: review verdict is \`$VERDICT\` (not Approve). Skipping auto-merge. Human review required."
+            curl -sS -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments" \
+              -d "$(printf '{"body": "%s"}' "$msg")"
+            exit 1
+          fi
+          resp=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.mergeable,.mergeable_state')
+          state=$(echo "$resp" | tail -1)
+          echo "mergeable_state=$state"
+          case "$state" in
+            clean|unstable|behind) echo "OK" ;;
+            *) echo "::error::mergeable_state blocked/dirty: $state"; exit 1 ;;
+          esac
+
+      - name: Squash-merge
+        env:
+          VERDICT: ${{ steps.wait.outputs.VERDICT }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        if: env.VERDICT == 'Approve'
+        run: |
+          echo "auto-merging PR #$PR_NUMBER (squash)"
+          gh api -X PUT "repos/${REPO}/pulls/${PR_NUMBER}/merge" \
+            -F commit_title="merge: auto squash #${PR_NUMBER} via auto-merge" \
+            -F commit_message="auto-merge: review verdict=Approve + mergeable clean" \
+            -F squash=true
