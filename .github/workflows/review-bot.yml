@@ -8,5 +8,28 @@ permissions:
   issues: write
 jobs:
   review:
-    uses: mybotagent/hermes-pr-gate/.github/workflows/review-bot-reusable.yml@main
-    secrets: inherit
+    name: hermes review (MiniMax)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Resolve PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          N="${{ github.event.pull_request.number }}"
+          echo "number=${N}" >> "$GITHUB_OUTPUT"
+      - name: Run review script
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          MINIMAX_BASE_URL: ${{ secrets.MINIMAX_BASE_URL }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REPO: ${{ github.repository }}
+        run: python3 scripts/review_pr.py
