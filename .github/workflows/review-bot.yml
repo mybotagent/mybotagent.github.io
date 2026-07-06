@@ -9,6 +9,4 @@ permissions:
 jobs:
   review:
     uses: mybotagent/hermes-pr-gate/.github/workflows/review-bot-reusable.yml@main
-    secrets:
-      MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
-      MINIMAX_BASE_URL: ${{ secrets.MINIMAX_BASE_URL }}
+    secrets: inherit
