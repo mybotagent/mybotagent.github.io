@@ -58,7 +58,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
     steps:
-      - name: Resolve PR number
+      - name: Resolve PR number + head sha
         id: pr
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -68,7 +68,14 @@ jobs:
           fi
           echo "number=${N}" >> "$GITHUB_OUTPUT"
           echo "number=${N}" >> "$GITHUB_ENV"
-          echo "head_sha=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_ENV"
+          # When dispatch path, head sha must be fetched live (event payload is empty)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ -z "${{ github.event.pull_request.head.sha }}" ]; then
+            HEAD_SHA=$(gh api "repos/${REPO}/pulls/${N}" --jq '.head.sha')
+          else
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          fi
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_ENV"
 
       - name: Wait for review-bot verdict (NEWEST comment matching HEAD sha)
         id: wait
